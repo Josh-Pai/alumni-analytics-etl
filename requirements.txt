@@ -1,0 +1,4 @@
+pandas
+google-cloud-bigquery
+airtable-python-wrapper
+python-dotenv
