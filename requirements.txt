@@ -1,4 +1,6 @@
 pandas
+pandas-gbq
 google-cloud-bigquery
 airtable-python-wrapper
 python-dotenv
+pyarrow
