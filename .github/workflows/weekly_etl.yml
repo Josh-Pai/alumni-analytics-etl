@@ -1,0 +1,54 @@
+name: Weekly Alumni Data ETL
+
+on:
+  # Schedule: Runs at 11:00 UTC (06:00 AM EST) every Monday
+  schedule:
+    - cron: '0 11 * * 1' 
+  # Manual Trigger: Allows manual execution from the Actions tab for testing
+  workflow_dispatch:
+
+jobs:
+  run-etl-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository code so the runner can access main.py
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Configure the Python environment to match local development (3.12)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12' 
+
+      # Step 3: Install necessary Python libraries defined in requirements.txt
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Generate the temporary GCP JSON key file from the encrypted GitHub Secret
+      - name: Create GCP Service Account Key
+        run: |
+          echo "${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}" > google_key.json
+
+# Step 5: Execute the main ETL script
+      - name: Run ETL Script
+        env:
+          # --- SECRETS (Hidden) ---
+          # These come from the Settings > Secrets menu
+          AIRTABLE_API_KEY: ${{ secrets.AIRTABLE_API_KEY }}
+          
+          # --- SPECIAL CASE (File Generation) ---
+          # Point to the temp file we created in Step 4
+          GOOGLE_APPLICATION_CREDENTIALS: google_key.json
+
+          # --- CONFIG (Visible) ---
+          AIRTABLE_BASE_ID: 'app7fkEOJwCiummRl' 
+          AIRTABLE_TABLE_NAME: 'Alumni Info'
+          GCP_PROJECT_ID: 'alumni-dashboard-477419'
+          BIGQUERY_DATASET_ID: 'alumni_stats_dataset'
+        
+        run: |
+          python main.py
