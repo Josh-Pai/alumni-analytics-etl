@@ -28,10 +28,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Step 4: Generate the temporary GCP JSON key file from the encrypted GitHub Secret
+# Step 4: Create the GCP Service Account Key File
       - name: Create GCP Service Account Key
+        env:
+          # Load the secret into a variable first (This protects the quotes)
+          GCP_KEY_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
         run: |
-          echo "${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}" > google_key.json
+          # Now echo the variable
+          echo "$GCP_KEY_JSON" > google_key.json
 
 # Step 5: Execute the main ETL script
       - name: Run ETL Script
