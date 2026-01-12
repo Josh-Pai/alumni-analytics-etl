@@ -9,6 +9,15 @@ from google.api_core import exceptions as google_exceptions
 # SETUP
 # -----------------------------------------------------------------
 
+# Columns allowed for processing in transformations
+SAFE_COLUMNS = [
+    'Current Company',
+    'Current Title',
+    'Location',
+    'Major',
+    'Graduation Year'
+]
+
 # Load environment variables from .env file
 print("Loading environment variables...")
 load_dotenv()
@@ -74,6 +83,50 @@ def load_dataframe_to_bigquery(dataframe, table_name):
         print(f"  └── Details: {e}")
 
 # -----------------------------------------------------------------
+# TRANSFORM - Pure Functions
+# -----------------------------------------------------------------
+def build_company_stats(df_safe):
+    # As discovered in the prototype, we must drop rows where the company is null
+    df_company = df_safe.reindex(columns=['Current Company']).dropna(subset=['Current Company']).copy()
+    stats_company = df_company.groupby('Current Company').size().reset_index(name='alumni_count')
+    stats_company = stats_company.rename(columns={'Current Company': 'company_name'})
+    stats_company = stats_company[['company_name', 'alumni_count']]
+    return stats_company
+
+
+def build_job_title_stats(df_safe):
+    df_jobs = df_safe.reindex(columns=['Current Title']).dropna(subset=['Current Title']).copy()
+    stats_jobs = df_jobs.groupby('Current Title').size().reset_index(name='job_count')
+    stats_jobs = stats_jobs.rename(columns={'Current Title': 'job_title'})
+    stats_jobs = stats_jobs[['job_title', 'job_count']]
+    return stats_jobs
+
+
+def build_major_stats(df_safe):
+    df_major = df_safe.reindex(columns=['Major']).dropna(subset=['Major']).copy()
+    stats_major = df_major.groupby('Major').size().reset_index(name='major_count')
+    stats_major = stats_major.rename(columns={'Major': 'major'})
+    stats_major = stats_major[['major', 'major_count']]
+    return stats_major
+
+
+def build_location_stats(df_safe):
+    df_location = df_safe.reindex(columns=['Location']).dropna(subset=['Location']).copy()
+
+    # Split "City, State" into two columns
+    df_location[['city', 'state_raw']] = df_location['Location'].str.split(',', expand=True, n=1)
+
+    # Clean whitespace and add Country context
+    df_location['city'] = df_location['city'].str.strip()
+    df_location['state'] = df_location['state_raw'].str.strip()
+    df_location['country'] = 'United States'
+
+    # Group by the new, clean columns
+    stats_location = df_location.groupby(['country', 'state', 'city']).size().reset_index(name='alumni_count')
+    stats_location = stats_location[['country', 'state', 'city', 'alumni_count']]
+    return stats_location
+
+# -----------------------------------------------------------------
 # MAIN ETL FUNCTION
 # -----------------------------------------------------------------
 def run_etl():
@@ -101,51 +154,24 @@ def run_etl():
     # -----------------------------------------------------------------
     print("\n--- TRANSFORM ---")
     print("Starting: Anonymizing and aggregating data...")
-    
-    # Define the columns to use
-    safe_columns = [
-        'Current Company', 
-        'Current Title', 
-        'Location', 
-        'Major',
-        'Graduation Year'
-    ]
-    
+
     # Use reindex for robust schema definition
-    df_safe = df_raw.reindex(columns=safe_columns)
+    df_safe = df_raw.reindex(columns=SAFE_COLUMNS)
 
     # --- T1: Company Stats ---
-    # As discovered in the prototype, we must drop rows where the company is null
-    df_company = df_safe.dropna(subset=['Current Company']).copy()
-    stats_company = df_company.groupby('Current Company').size().reset_index(name='alumni_count')
-    stats_company = stats_company.rename(columns={'Current Company': 'company_name'})
+    stats_company = build_company_stats(df_safe)
     print(f"  Processed {len(stats_company)} Company aggregates.")
 
     # --- T2: Job Title Stats ---
-    df_jobs = df_safe.dropna(subset=['Current Title']).copy()
-    stats_jobs = df_jobs.groupby('Current Title').size().reset_index(name='job_count')
-    stats_jobs = stats_jobs.rename(columns={'Current Title': 'job_title'})
+    stats_jobs = build_job_title_stats(df_safe)
     print(f"  Processed {len(stats_jobs)} Job Title aggregates.")
 
     # --- T3: Major Stats ---
-    df_major = df_safe.dropna(subset=['Major']).copy()
-    stats_major = df_major.groupby('Major').size().reset_index(name='major_count')
-    stats_major = stats_major.rename(columns={'Major': 'major'})
+    stats_major = build_major_stats(df_safe)
     print(f"  Processed {len(stats_major)} Major aggregates.")
 
     # --- T4: Location Stats (Geospatial Normalization) ---
-    df_location = df_safe.dropna(subset=['Location']).copy()
-    
-    # Split "City, State" into two columns
-    df_location[['city', 'state_raw']] = df_location['Location'].str.split(',', expand=True, n=1)
-    
-    # Clean whitespace and add Country context
-    df_location['city'] = df_location['city'].str.strip()
-    df_location['state'] = df_location['state_raw'].str.strip()
-    df_location['country'] = 'United States'
-    
-    # Group by the new, clean columns
-    stats_location = df_location.groupby(['country', 'state', 'city']).size().reset_index(name='alumni_count')
+    stats_location = build_location_stats(df_safe)
     print(f"  Processed {len(stats_location)} Location aggregates.")
 
     print("Transformation complete.")
