@@ -50,37 +50,18 @@ except Exception as e:
     print(f"❌ ERROR: Failed to initialize clients. {e}")
     exit()
 
+
 # -----------------------------------------------------------------
-# LOAD - Helper Function
+# EXTRACT - Pure Functions
 # -----------------------------------------------------------------
-def load_dataframe_to_bigquery(dataframe, table_name):
-    """
-    Loads a Pandas DataFrame into a specified BigQuery table.
-    This function will OVERWRITE the existing table (WRITE_TRUNCATE).
-    """
-    
-    # Full BigQuery path: PROJECT_ID.DATASET_ID.table_name
-    table_id = f"{GCP_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{table_name}"
-    
-    job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE",
-    )
-    
-    try:
-        print(f"  Loading {len(dataframe)} rows into {table_id}...")
-        # Start the load job
-        job = bigquery_client.load_table_from_dataframe(
-            dataframe, table_id, job_config=job_config
-        )
-        job.result()  # Wait for the job to complete
-        print(f"  ✅ SUCCESS: Load complete for {table_id}")
-        
-    except google_exceptions.NotFound as e:
-        print(f"  ❌ ERROR: {table_id} failed to load. The dataset '{BIGQUERY_DATASET_ID}' might not exist.")
-        print(f"  └── Details: {e}")
-    except Exception as e:
-        print(f"  ❌ ERROR: {table_id} failed to load.")
-        print(f"  └── Details: {e}")
+
+def extract_from_airtable(airtable_client) -> pd.DataFrame:
+    print("Starting: Fetching all records from Airtable...")
+    all_records = airtable_client.get_all()
+    df_raw = pd.DataFrame([r.get('fields', {}) for r in all_records])
+    print(f"Successfully extracted {len(df_raw)} raw records.")
+    return df_raw
+
 
 # -----------------------------------------------------------------
 # TRANSFORM - Pure Functions
@@ -127,6 +108,44 @@ def build_location_stats(df_safe):
     return stats_location
 
 # -----------------------------------------------------------------
+# LOAD - Pure Functions
+# -----------------------------------------------------------------
+def load_dataframe_to_bigquery(dataframe, table_name):
+    """
+    Loads a Pandas DataFrame into a specified BigQuery table.
+    This function will OVERWRITE the existing table (WRITE_TRUNCATE).
+    """
+    
+    # Full BigQuery path: PROJECT_ID.DATASET_ID.table_name
+    table_id = f"{GCP_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{table_name}"
+    
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_TRUNCATE",
+    )
+    
+    try:
+        print(f"  Loading {len(dataframe)} rows into {table_id}...")
+        # Start the load job
+        job = bigquery_client.load_table_from_dataframe(
+            dataframe, table_id, job_config=job_config
+        )
+        job.result()  # Wait for the job to complete
+        print(f"  ✅ SUCCESS: Load complete for {table_id}")
+        
+    except google_exceptions.NotFound as e:
+        print(f"  ❌ ERROR: {table_id} failed to load. The dataset '{BIGQUERY_DATASET_ID}' might not exist.")
+        print(f"  └── Details: {e}")
+    except Exception as e:
+        print(f"  ❌ ERROR: {table_id} failed to load.")
+        print(f"  └── Details: {e}")
+
+def load_stats_tables(bigquery_client, project_id: str, dataset_id: str, outputs: dict[str, pd.DataFrame]) -> None:
+    print("Starting: Loading all aggregated tables to BigQuery...")
+    for table_name, df in outputs.items():
+        load_dataframe_to_bigquery(df, table_name)
+
+
+# -----------------------------------------------------------------
 # MAIN ETL FUNCTION
 # -----------------------------------------------------------------
 def run_etl():
@@ -136,18 +155,13 @@ def run_etl():
     # EXTRACT
     # -----------------------------------------------------------------
     print("\n--- EXTRACT ---")
-    print("Starting: Fetching all records from Airtable...")
     try:
-        # Get all records from the specified table
-        all_records = airtable.get_all()
-        # Convert list of field dicts into a raw DataFrame
-        df_raw = pd.DataFrame([r['fields'] for r in all_records])
-        print(f"Successfully extracted {len(df_raw)} raw records.")
-    
+        df_raw = extract_from_airtable(airtable)
     except Exception as e:
-        print(f"❌ ERROR: Failed to extract from Airtable. Check your Token, Base ID, and Table Name.")
+        print("❌ ERROR: Failed to extract from Airtable. Check your Token, Base ID, and Table Name.")
         print(f"   └── Details: {e}")
-        return # Stop the script if extraction fails
+        return
+
 
     # -----------------------------------------------------------------
     # TRANSFORM
@@ -180,13 +194,14 @@ def run_etl():
     # LOAD
     # -----------------------------------------------------------------
     print("\n--- LOAD ---")
-    print("Starting: Loading all aggregated tables to BigQuery...")
+    outputs = {
+        "stats_company": stats_company,
+        "stats_job_title": stats_jobs,
+        "stats_major": stats_major,
+        "stats_location": stats_location,
+    }
+    load_stats_tables(bigquery_client, GCP_PROJECT_ID, BIGQUERY_DATASET_ID, outputs)
 
-    # Execute all load operations. The helper function handles WRITE_TRUNCATE.
-    load_dataframe_to_bigquery(stats_company, "stats_company")
-    load_dataframe_to_bigquery(stats_jobs, "stats_job_title")
-    load_dataframe_to_bigquery(stats_major, "stats_major")
-    load_dataframe_to_bigquery(stats_location, "stats_location")
 
     print("\nETL pipeline finished successfully!")
 
