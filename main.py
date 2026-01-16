@@ -3,11 +3,17 @@ import pandas as pd
 from dotenv import load_dotenv
 from airtable import Airtable
 from google.cloud import bigquery
-from google.api_core import exceptions as google_exceptions
+from alumni_etl.extractors import extract_from_airtable, extract_from_csv
+from alumni_etl.loaders import load_stats_tables
+
 
 # -----------------------------------------------------------------
 # SETUP
 # -----------------------------------------------------------------
+
+# Load environment variables from .env file
+print("Loading environment variables...")
+load_dotenv()
 
 # Columns allowed for processing in transformations
 SAFE_COLUMNS = [
@@ -18,49 +24,97 @@ SAFE_COLUMNS = [
     'Graduation Year'
 ]
 
-# Load environment variables from .env file
-print("Loading environment variables...")
-load_dotenv()
+# Runtime mode controls how THIS run behaves (no code changes needed)
+# - DATA_SOURCE: where raw data comes from
+# - DATA_MODE: where aggregated outputs are written
+DATA_SOURCE = os.getenv("DATA_SOURCE", "airtable").strip().lower()   # airtable | csv
+DATA_MODE = os.getenv("DATA_MODE", "prod").strip().lower()           # prod | demo
 
-# --- Airtable Config ---
+
+# -----------------------------------------------------------------
+# Prod Config
+# -----------------------------------------------------------------
+
+# Source - Airtable (only required when DATA_SOURCE=airtable)
 AIRTABLE_BASE_ID = os.getenv('AIRTABLE_BASE_ID')
 AIRTABLE_TABLE_NAME = os.getenv('AIRTABLE_TABLE_NAME')
 AIRTABLE_API_KEY = os.getenv('AIRTABLE_API_KEY')
 
-# --- BigQuery Config ---
+# Destination - BigQuery (project is always required; dataset depends on DATA_MODE)
 GCP_PROJECT_ID = os.getenv('GCP_PROJECT_ID')
-BIGQUERY_DATASET_ID = os.getenv('BIGQUERY_DATASET_ID')
+BIGQUERY_DATASET_ID = os.getenv('BIGQUERY_DATASET_ID')  # prod dataset id
 # GOOGLE_APPLICATION_CREDENTIALS is read automatically by the Google client library
 
-# --- Initialize Clients ---
-# Check if all keys are present before trying to connect
-if not all([AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, AIRTABLE_API_KEY, GCP_PROJECT_ID, BIGQUERY_DATASET_ID]):
-    print("❌ ERROR: One or more environment variables are missing from your .env file.")
-    print("Please check all 5 variables (AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, AIRTABLE_API_KEY, GCP_PROJECT_ID, BIGQUERY_DATASET_ID).")
-    exit()
+# -----------------------------------------------------------------
+# Demo Config
+# -----------------------------------------------------------------
+
+# Source - CSV (used when DATA_SOURCE=csv)
+DEMO_CSV_PATH = os.getenv("DEMO_CSV_PATH", "data/demo_alumni.csv")
+
+# Destination - BigQuery demo dataset (required when DATA_MODE=demo)
+BIGQUERY_DEMO_DATASET_ID = os.getenv("BIGQUERY_DEMO_DATASET_ID")  # demo dataset id
+
+# -----------------------------------------------------------------
+# Validate runtime configuration early
+# -----------------------------------------------------------------
+if DATA_SOURCE not in {"airtable", "csv"}:
+    raise ValueError("Invalid DATA_SOURCE. Use 'airtable' or 'csv'.")
+
+if DATA_MODE not in {"prod", "demo"}:
+    raise ValueError("Invalid DATA_MODE. Use 'prod' or 'demo'.")
+
+if not GCP_PROJECT_ID:
+    raise ValueError("Missing GCP_PROJECT_ID (required).")
+
+if DATA_MODE == "prod" and not BIGQUERY_DATASET_ID:
+    raise ValueError("Missing BIGQUERY_DATASET_ID (required when DATA_MODE=prod).")
+
+if DATA_MODE == "demo" and not BIGQUERY_DEMO_DATASET_ID:
+    raise ValueError("Missing BIGQUERY_DEMO_DATASET_ID (required when DATA_MODE=demo).")
+
+if DATA_SOURCE == "airtable":
+    missing = [k for k, v in {
+        "AIRTABLE_BASE_ID": AIRTABLE_BASE_ID,
+        "AIRTABLE_TABLE_NAME": AIRTABLE_TABLE_NAME,
+        "AIRTABLE_API_KEY": AIRTABLE_API_KEY,
+    }.items() if not v]
+    if missing:
+        raise ValueError(f"Missing Airtable config: {', '.join(missing)} (required when DATA_SOURCE=airtable).")
+
+
+# -----------------------------------------------------------------
+# Initialize Clients
+# -----------------------------------------------------------------
+# Create external clients based on runtime mode.
+# Airtable client is only required when DATA_SOURCE=airtable.
+# BigQuery client is required for loading outputs.
+
+airtable = None  # only initialized in airtable mode
 
 try:
-    print("Connecting to Airtable...")
-    airtable = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, api_key=AIRTABLE_API_KEY)
-    
+    if DATA_SOURCE == "airtable":
+        print("Connecting to Airtable...")
+        airtable = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, api_key=AIRTABLE_API_KEY)
+
     print("Connecting to BigQuery...")
     bigquery_client = bigquery.Client()
+
     print("Connections initialized.")
 except Exception as e:
     print(f"❌ ERROR: Failed to initialize clients. {e}")
-    exit()
+    exit(1)
 
 
-# -----------------------------------------------------------------
-# EXTRACT - Pure Functions
-# -----------------------------------------------------------------
 
-def extract_from_airtable(airtable_client) -> pd.DataFrame:
-    print("Starting: Fetching all records from Airtable...")
-    all_records = airtable_client.get_all()
-    df_raw = pd.DataFrame([r.get('fields', {}) for r in all_records])
-    print(f"Successfully extracted {len(df_raw)} raw records.")
-    return df_raw
+def get_target_dataset_id() -> str:
+    """
+    Select the BigQuery dataset to write to based on DATA_MODE.
+    - prod: BIGQUERY_DATASET_ID
+    - demo: BIGQUERY_DEMO_DATASET_ID
+    """
+    return BIGQUERY_DEMO_DATASET_ID if DATA_MODE == "demo" else BIGQUERY_DATASET_ID
+
 
 
 # -----------------------------------------------------------------
@@ -107,43 +161,6 @@ def build_location_stats(df_safe):
     stats_location = stats_location[['country', 'state', 'city', 'alumni_count']]
     return stats_location
 
-# -----------------------------------------------------------------
-# LOAD - Pure Functions
-# -----------------------------------------------------------------
-def load_dataframe_to_bigquery(dataframe, table_name):
-    """
-    Loads a Pandas DataFrame into a specified BigQuery table.
-    This function will OVERWRITE the existing table (WRITE_TRUNCATE).
-    """
-    
-    # Full BigQuery path: PROJECT_ID.DATASET_ID.table_name
-    table_id = f"{GCP_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{table_name}"
-    
-    job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE",
-    )
-    
-    try:
-        print(f"  Loading {len(dataframe)} rows into {table_id}...")
-        # Start the load job
-        job = bigquery_client.load_table_from_dataframe(
-            dataframe, table_id, job_config=job_config
-        )
-        job.result()  # Wait for the job to complete
-        print(f"  ✅ SUCCESS: Load complete for {table_id}")
-        
-    except google_exceptions.NotFound as e:
-        print(f"  ❌ ERROR: {table_id} failed to load. The dataset '{BIGQUERY_DATASET_ID}' might not exist.")
-        print(f"  └── Details: {e}")
-    except Exception as e:
-        print(f"  ❌ ERROR: {table_id} failed to load.")
-        print(f"  └── Details: {e}")
-
-def load_stats_tables(bigquery_client, project_id: str, dataset_id: str, outputs: dict[str, pd.DataFrame]) -> None:
-    print("Starting: Loading all aggregated tables to BigQuery...")
-    for table_name, df in outputs.items():
-        load_dataframe_to_bigquery(df, table_name)
-
 
 # -----------------------------------------------------------------
 # MAIN ETL FUNCTION
@@ -156,11 +173,17 @@ def run_etl():
     # -----------------------------------------------------------------
     print("\n--- EXTRACT ---")
     try:
-        df_raw = extract_from_airtable(airtable)
+        if DATA_SOURCE == "csv":
+            # Demo/local mode: read from CSV
+            df_raw = extract_from_csv(DEMO_CSV_PATH)
+        else:
+            # Production mode: read from Airtable
+            df_raw = extract_from_airtable(airtable)
     except Exception as e:
-        print("❌ ERROR: Failed to extract from Airtable. Check your Token, Base ID, and Table Name.")
+        print("❌ ERROR: Failed to extract data.")
         print(f"   └── Details: {e}")
         return
+
 
 
     # -----------------------------------------------------------------
@@ -194,13 +217,23 @@ def run_etl():
     # LOAD
     # -----------------------------------------------------------------
     print("\n--- LOAD ---")
+
+    # Choose target dataset based on runtime mode
+    target_dataset_id = get_target_dataset_id()
+
     outputs = {
         "stats_company": stats_company,
         "stats_job_title": stats_jobs,
         "stats_major": stats_major,
         "stats_location": stats_location,
     }
-    load_stats_tables(bigquery_client, GCP_PROJECT_ID, BIGQUERY_DATASET_ID, outputs)
+
+    load_stats_tables(
+        bigquery_client=bigquery_client,
+        project_id=GCP_PROJECT_ID,
+        dataset_id=target_dataset_id,
+        outputs=outputs,
+    )
 
 
     print("\nETL pipeline finished successfully!")
