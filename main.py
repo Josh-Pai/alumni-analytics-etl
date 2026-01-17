@@ -5,6 +5,13 @@ from airtable import Airtable
 from google.cloud import bigquery
 from alumni_etl.extractors import extract_from_airtable, extract_from_csv
 from alumni_etl.loaders import load_stats_tables
+from alumni_etl.transforms import (
+    build_company_stats,
+    build_job_title_stats,
+    build_major_stats,
+    build_location_stats,
+)
+
 
 
 # -----------------------------------------------------------------
@@ -114,52 +121,6 @@ def get_target_dataset_id() -> str:
     - demo: BIGQUERY_DEMO_DATASET_ID
     """
     return BIGQUERY_DEMO_DATASET_ID if DATA_MODE == "demo" else BIGQUERY_DATASET_ID
-
-
-
-# -----------------------------------------------------------------
-# TRANSFORM - Pure Functions
-# -----------------------------------------------------------------
-def build_company_stats(df_safe):
-    # As discovered in the prototype, we must drop rows where the company is null
-    df_company = df_safe.reindex(columns=['Current Company']).dropna(subset=['Current Company']).copy()
-    stats_company = df_company.groupby('Current Company').size().reset_index(name='alumni_count')
-    stats_company = stats_company.rename(columns={'Current Company': 'company_name'})
-    stats_company = stats_company[['company_name', 'alumni_count']]
-    return stats_company
-
-
-def build_job_title_stats(df_safe):
-    df_jobs = df_safe.reindex(columns=['Current Title']).dropna(subset=['Current Title']).copy()
-    stats_jobs = df_jobs.groupby('Current Title').size().reset_index(name='job_count')
-    stats_jobs = stats_jobs.rename(columns={'Current Title': 'job_title'})
-    stats_jobs = stats_jobs[['job_title', 'job_count']]
-    return stats_jobs
-
-
-def build_major_stats(df_safe):
-    df_major = df_safe.reindex(columns=['Major']).dropna(subset=['Major']).copy()
-    stats_major = df_major.groupby('Major').size().reset_index(name='major_count')
-    stats_major = stats_major.rename(columns={'Major': 'major'})
-    stats_major = stats_major[['major', 'major_count']]
-    return stats_major
-
-
-def build_location_stats(df_safe):
-    df_location = df_safe.reindex(columns=['Location']).dropna(subset=['Location']).copy()
-
-    # Split "City, State" into two columns
-    df_location[['city', 'state_raw']] = df_location['Location'].str.split(',', expand=True, n=1)
-
-    # Clean whitespace and add Country context
-    df_location['city'] = df_location['city'].str.strip()
-    df_location['state'] = df_location['state_raw'].str.strip()
-    df_location['country'] = 'United States'
-
-    # Group by the new, clean columns
-    stats_location = df_location.groupby(['country', 'state', 'city']).size().reset_index(name='alumni_count')
-    stats_location = stats_location[['country', 'state', 'city', 'alumni_count']]
-    return stats_location
 
 
 # -----------------------------------------------------------------
