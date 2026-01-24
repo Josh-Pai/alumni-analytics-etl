@@ -5,3 +5,6 @@ airtable-python-wrapper
 python-dotenv
 pyarrow
 pytest
+FastAPI
+uvicorn
+pydantic
